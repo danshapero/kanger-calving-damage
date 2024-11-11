@@ -59,8 +59,13 @@ for key in ["vx", "vy", "ex", "ey"]:
         velocity_data[key] = source.read(indexes=1, window=window)
 
 no_data = -2e9
-for val in velocity_data.values():
+for key in ["vx", "vy"]:
+    val = velocity_data[key]
     val[val == no_data] = 0.0
+
+for key in ["ex", "ey"]:
+    val = velocity_data[key]
+    val[val == no_data] = 100e3
 
 ny, nx = velocity_data["vx"].shape
 xs = np.linspace(xmin, xmax, nx)
@@ -68,16 +73,22 @@ ys = np.linspace(ymin, ymax, ny)
 kw = {"dims": ("y", "x"), "coords": {"x": xs, "y": ys}}
 vx = xarray.DataArray(np.flipud(velocity_data["vx"]), **kw)
 vy = xarray.DataArray(np.flipud(velocity_data["vy"]), **kw)
+ex = xarray.DataArray(np.flipud(velocity_data["ex"]), **kw)
+ey = xarray.DataArray(np.flipud(velocity_data["ey"]), **kw)
 
 bedmachine_filename = icepack.datasets.fetch_bedmachine_greenland()
 bedmachine = xarray.open_dataset(bedmachine_filename)
 
 # Interpolate the data to the finite element mesh
-u = icepack.interpolate((vx, vy), V)
-u_in = u.copy(deepcopy=True)
+u_obs = icepack.interpolate((vx, vy), V)
+u_in = u_obs.copy(deepcopy=True)
 b = icepack.interpolate(bedmachine["bed"], S)
 h = firedrake.project(icepack.interpolate(bedmachine["thickness"], S), Q)
 s = max_value(b + h, (1 - ρ_I / ρ_W) * h)
+
+σx = icepack.interpolate(ex, Q)
+σy = icepack.interpolate(ey, Q)
+P = firedrake.Function(Q).interpolate(1.0 / firedrake.sqrt(σx**2 + σy**2))
 
 # Do a continuation method for the initial velocity solve
 A = icepack.rate_factor(Constant(260.0))
@@ -165,9 +176,53 @@ L = sum(fn(**fields, **rheology) for fn in fns)
 F = firedrake.derivative(L, z)
 J = firedrake.derivative(F, z)
 
+firedrake.adjoint.continue_annotation()
+
 problem = firedrake.NonlinearVariationalProblem(F, z, J=J_r, **problem_params)
 solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
 solver.solve()
+
+import pyadjoint
+from firedrake.adjoint import ReducedFunctional, Control
+u, M, τ = firedrake.split(z)
+area = assemble(Constant(1) * dx(mesh))
+E = 0.5 * P**2 * inner(u - u_obs, u - u_obs) * dx
+print(np.sqrt(assemble(E) / area))
+α = Constant(5e3)
+R = 0.5 * α**2 * inner(grad(q), grad(q)) * dx
+controls = [Control(q)]
+K = ReducedFunctional(assemble(E) + assemble(R), controls)
+inverse_problem = pyadjoint.MinimizationProblem(K)
+params = {
+    "Step": {
+        "Type": "Trust Region",
+        "Trust Region": {
+            "Initial Radius": -1,
+            "Subproblem Solver": "Truncated CG",
+            "Radius Growing Rate": 2.5,
+            "Step Acceptance Threshold": 0.05,
+            "Radius Shrinking Threshold": 0.05,
+            "Radius Growing Threshold": 0.9,
+            "Radius Shrinking Rate (Negative rho)": 0.0625,
+            "Radius Shrinking Rate (Positive rho)": 0.25,
+            "Sufficient Decrease Parameter": 1e-4,
+            "Safeguard Size": 1e2,
+        },
+    },
+    "Status Test": {
+        "Gradient Tolerance": 1e-4,
+        "Step Tolerance": 5e-3,
+        "Iteration Limit": 50,
+    },
+    "General": {
+        "Print Verbosity": 0,
+        "Secant": {},
+    },
+}
+inverse_solver = pyadjoint.ROLSolver(inverse_problem, params, inner_product="L2")
+q_optimal = inverse_solver.solve()
+
+firedrake.adjoint.pause_annotation()
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()
