@@ -125,6 +125,7 @@ linear_rheology = {
     "sliding_coefficient": u_c / τ_c * exp(q),
 }
 
+# Initial solve assuming linear rheology
 L_r1 = sum(fn(**rfields, **linear_rheology) for fn in fns)
 F_r1 = firedrake.derivative(L_r1, z)
 J_r1 = firedrake.derivative(F_r1, z)
@@ -144,13 +145,27 @@ solver_params = {
     "solver_parameters": {
         "snes_monitor": None,
         "snes_type": "newtonls",
+        "snes_divergence_tolerance": 1e300,
         "snes_linesearch_type": "nleqerr",
         "ksp_type": "gmres",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "umfpack",
     },
 }
-problem = firedrake.NonlinearVariationalProblem(F_1, z, J=J_r1, **problem_params)
+lproblem = firedrake.NonlinearVariationalProblem(F_1, z, J=J_r1, **problem_params)
+lsolver = firedrake.NonlinearVariationalSolver(lproblem, **solver_params)
+lsolver.solve()
+
+# Nonlinear solve
+L_r = sum(fn(**rfields, **rheology) for fn in fns)
+F_r = firedrake.derivative(L_r, z)
+J_r = firedrake.derivative(F_r, z)
+
+L = sum(fn(**fields, **rheology) for fn in fns)
+F = firedrake.derivative(L, z)
+J = firedrake.derivative(F, z)
+
+problem = firedrake.NonlinearVariationalProblem(F, z, J=J_r, **problem_params)
 solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
 solver.solve()
 
