@@ -192,36 +192,7 @@ print(np.sqrt(assemble(E) / area))
 R = 0.5 * α**2 * inner(grad(q), grad(q)) * dx
 controls = [Control(q)]
 K = ReducedFunctional(assemble(E) + assemble(R), controls)
-inverse_problem = pyadjoint.MinimizationProblem(K)
-params = {
-    "Step": {
-        "Type": "Trust Region",
-        "Trust Region": {
-            "Initial Radius": -1,
-            "Subproblem Solver": "Truncated CG",
-            "Radius Growing Rate": 2.5,
-            "Step Acceptance Threshold": 0.05,
-            "Radius Shrinking Threshold": 0.05,
-            "Radius Growing Threshold": 0.9,
-            "Radius Shrinking Rate (Negative rho)": 0.0625,
-            "Radius Shrinking Rate (Positive rho)": 0.25,
-            "Sufficient Decrease Parameter": 1e-4,
-            "Safeguard Size": 1e2,
-        },
-    },
-    "Status Test": {
-        "Gradient Tolerance": 1e-4,
-        "Step Tolerance": 5e-3,
-        "Iteration Limit": 50,
-    },
-    "General": {
-        "Print Verbosity": 0,
-        "Secant": {},
-    },
-}
-inverse_solver = pyadjoint.ROLSolver(inverse_problem, params, inner_product="L2")
-q_optimal = inverse_solver.solve()
-
+G = K.derivative()
 firedrake.adjoint.pause_annotation()
 
 import matplotlib.pyplot as plt
