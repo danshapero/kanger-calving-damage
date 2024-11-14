@@ -155,9 +155,13 @@ problem_params = {}
 solver_params = {
     "solver_parameters": {
         "snes_monitor": None,
-        "snes_type": "newtonls",
+        "snes_converged_reason": None,
+        "snes_type": "newtontr",
         "snes_divergence_tolerance": 1e300,
         "snes_linesearch_type": "nleqerr",
+        "snes_rtol": 1e-9,
+        "snes_stol": 0.0,
+        #"ksp_monitor": None,
         "ksp_type": "gmres",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "umfpack",
@@ -176,24 +180,33 @@ L = sum(fn(**fields, **rheology) for fn in fns)
 F = firedrake.derivative(L, z)
 J = firedrake.derivative(F, z)
 
-firedrake.adjoint.continue_annotation()
-
 problem = firedrake.NonlinearVariationalProblem(F, z, J=J_r, **problem_params)
 solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
 solver.solve()
 
-import pyadjoint
-from firedrake.adjoint import ReducedFunctional, Control
 u, M, τ = firedrake.split(z)
 area = assemble(Constant(1) * dx(mesh))
-E = 0.5 * P**2 * inner(u - u_obs, u - u_obs) * dx
-print(np.sqrt(assemble(E) / area))
+Ω = Constant(area)
+E = 0.5 / Ω * P**2 * inner(u - u_obs, u - u_obs) * dx
+print(np.sqrt(assemble(E)))
 α = Constant(5e3)
-R = 0.5 * α**2 * inner(grad(q), grad(q)) * dx
-controls = [Control(q)]
-K = ReducedFunctional(assemble(E) + assemble(R), controls)
-G = K.derivative()
-firedrake.adjoint.pause_annotation()
+R = 0.5 / Ω * α**2 * inner(grad(q), grad(q)) * dx
+
+u_f = Constant(500)
+δq = firedrake.max_value(0, inner(u, u) / u_f**2 - 1)
+
+K = E + R
+dK = firedrake.derivative(K, z)
+λ = firedrake.Function(Z)
+γ = Constant(1e-3)
+adjoint_bcs = firedrake.DirichletBC(Z.sub(0), Constant((0.0, 0.0)), "on_boundary")
+firedrake.solve(
+    firedrake.adjoint(J + γ * J_r) == -dK,
+    λ,
+    adjoint_bcs,
+    **solver_params,
+)
+
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()
