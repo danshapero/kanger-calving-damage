@@ -167,17 +167,32 @@ h_solver = firedrake.NonlinearVariationalSolver(h_problem)
 
 # Set up things we need for calving
 h_min = firedrake.max_value(0, -ρ_W / ρ_I * b)
-# TODO: Finish this...
+δh = Constant(40.0)
 
 # Run the simulation
 t = Constant(0.0)
 h_c = Constant(5.0)
 num_steps = int(final_time * timesteps_per_year) + 1
-for step in range(num_steps):
-    t.assign(t + dt)
 
-    h_solver.solve()
-    h.interpolate(firedrake.conditional(h < h_c, 0, h))
-    h_n.assign(h)
-    s.interpolate(max_value(b + h, (1 - ρ_I / ρ_W) * h))
-    u_solver.solve()
+field_names = ["thickness", "velocity", "membrane_stress", "basal_stress"]
+with firedrake.CheckpointFile(output_filename, "w") as chk:
+    u, M, τ = z.subfunctions
+    for field, name in zip([h, u, M, τ], field_names):
+        chk.save_function(field, name=name, idx=0)
+
+    timesteps = np.linspace(0.0, final_time, num_steps)
+    for step in range(num_steps):
+        t.assign(t + dt)
+
+        h_solver.solve()
+        h.interpolate(firedrake.conditional(h < h_min + δh, 0, h))
+        h_n.assign(h)
+        s.interpolate(max_value(b + h, (1 - ρ_I / ρ_W) * h))
+        u_solver.solve()
+
+        for field, name in zip([h, u, M, τ], field_names):
+            chk.save_function(field, name=name, idx=step + 1)
+
+    chk.h5pyfile.create_dataset("timesteps", data=timesteps)
+
+
