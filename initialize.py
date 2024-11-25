@@ -200,13 +200,23 @@ dK = firedrake.derivative(K, z)
 λ = firedrake.Function(Z)
 γ = Constant(1e-3)
 adjoint_bcs = firedrake.DirichletBC(Z.sub(0), Constant((0.0, 0.0)), "on_boundary")
-firedrake.solve(
-    firedrake.adjoint(J + γ * J_r) == -dK,
-    λ,
-    adjoint_bcs,
-    **solver_params,
-)
-
+H = firedrake.adjoint(J + γ * J_r)
+adjoint_problem = firedrake.LinearVariationalProblem(H, -dK, λ, adjoint_bcs)
+adjoint_solver_params = {
+    "solver_parameters": {
+        "snes_type": "newtonls",
+        "snes_linesearch_type": "nleqerr",
+        "ksp_type": "gmres",
+        "pc_type": "lu",
+        "pc_factor_mat_solver_type": "mumps",
+    },
+}
+adjoint_solver = firedrake.LinearVariationalSolver(adjoint_problem, **adjoint_solver_params)
+adjoint_solver.solve()
+γ.assign(1e-6)
+adjoint_solver.solve()
+γ.assign(1e-9)
+adjoint_solver.solve()
 
 import matplotlib.pyplot as plt
 fig, ax = plt.subplots()
