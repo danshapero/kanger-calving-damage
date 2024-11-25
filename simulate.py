@@ -10,11 +10,14 @@ from icepack2.constants import (
     weertman_sliding_law as m,
     ice_density as ρ_I,
     water_density as ρ_W,
+    gravity as g,
 )
 
 options = PETSc.Options()
 input_filename = options.getString("input", "kangerlussuaq-initial.h5")
 output_filename = options.getString("output", "kangerlussuaq-simulation.h5")
+final_time = options.getReal("final-time", 0.5)
+timesteps_per_year = options.getInt("timesteps-per-year", 96)
 
 with firedrake.CheckpointFile(input_filename, "r") as chk:
     mesh = chk.load_mesh()
@@ -106,6 +109,7 @@ solver_params = {
     "solver_parameters": {
         "snes_monitor": None,
         "snes_type": "newtonls",
+        "snes_max_it": 300,
         "snes_divergence_tolerance": 1e300,
         "snes_linesearch_type": "nleqerr",
         "ksp_type": "gmres",
@@ -126,14 +130,54 @@ L = sum(fn(**fields, **rheology) for fn in fns)
 F = firedrake.derivative(L, z)
 J = firedrake.derivative(F, z)
 
-problem = firedrake.NonlinearVariationalProblem(F, z, J=J_r, **problem_params)
-solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
-solver.solve()
+u_problem = firedrake.NonlinearVariationalProblem(F, z, J=J_r, **problem_params)
+u_solver = firedrake.NonlinearVariationalSolver(u_problem, **solver_params)
+u_solver.solve()
 
 u, M, τ = z.subfunctions
-import matplotlib.pyplot as plt
-fig, ax = plt.subplots()
-ax.set_aspect("equal")
-colors = firedrake.tripcolor(u, axes=ax)
-fig.colorbar(colors)
-plt.show()
+
+# Fix the accumulation rate. We used estimates of surface mass balance from the
+# regional climate model MAR and remote sensing measurements of surface
+# elevation to estimate a linear relationship:
+#
+#     SMB ~= da_ds * s + a_0
+#
+# where `da_ds` ~= 2.25 milimeters of water equivalent per year per meter
+# elevation gain and `a_0` ~= -3.3 meters of water equivalent per year at sea
+# level. We used all the data from 2006-2017 and the fit had `r² = 0.91`.
+# See also https://www.climato.uliege.be/cms/c_5652668/fr/climato-greenland.
+da_ds = Constant(2.25 * 1e-3)
+a_0 = Constant(-3.3)
+a = 0.917 * (a_0 + da_ds * s)
+
+# Set up the mass balance equation
+h_n = h.copy(deepcopy=True)
+h0 = h.copy(deepcopy=True)
+φ = firedrake.TestFunction(h.function_space())
+dt = Constant(1.0 / timesteps_per_year)
+flux_cells = ((h - h_n) / dt * φ - inner(h * u, grad(φ)) - a * φ) * dx
+ν = firedrake.FacetNormal(mesh)
+f = h * max_value(0, inner(u, ν))
+flux_facets = (f("+") - f("-")) * (φ("+") - φ("-")) * dS
+flux_in = h0 * firedrake.min_value(0, inner(u, ν)) * φ * ds
+flux_out = h * max_value(0, inner(u, ν)) * φ * ds
+G = flux_cells + flux_facets + flux_in + flux_out
+h_problem = firedrake.NonlinearVariationalProblem(G, h)
+h_solver = firedrake.NonlinearVariationalSolver(h_problem)
+
+# Set up things we need for calving
+h_min = firedrake.max_value(0, -ρ_W / ρ_I * b)
+# TODO: Finish this...
+
+# Run the simulation
+t = Constant(0.0)
+h_c = Constant(5.0)
+num_steps = int(final_time * timesteps_per_year) + 1
+for step in range(num_steps):
+    t.assign(t + dt)
+
+    h_solver.solve()
+    h.interpolate(firedrake.conditional(h < h_c, 0, h))
+    h_n.assign(h)
+    s.interpolate(max_value(b + h, (1 - ρ_I / ρ_W) * h))
+    u_solver.solve()
