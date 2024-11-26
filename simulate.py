@@ -16,8 +16,9 @@ from icepack2.constants import (
 options = PETSc.Options()
 input_filename = options.getString("input", "kangerlussuaq-initial.h5")
 output_filename = options.getString("output", "kangerlussuaq-simulation.h5")
-final_time = options.getReal("final-time", 0.5)
-timesteps_per_year = options.getInt("timesteps-per-year", 96)
+final_time = options.getReal("final-time", 1.0)
+timesteps_per_year = options.getInt("timesteps-per-year", 192)
+critical_thickness = options.getReal("crit-thickness", 40.0)
 
 with firedrake.CheckpointFile(input_filename, "r") as chk:
     mesh = chk.load_mesh()
@@ -167,7 +168,7 @@ h_solver = firedrake.NonlinearVariationalSolver(h_problem)
 
 # Set up things we need for calving
 h_min = firedrake.max_value(0, -ρ_W / ρ_I * b)
-δh = Constant(40.0)
+δh = Constant(critical_thickness)
 
 # Run the simulation
 t = Constant(0.0)
@@ -185,7 +186,7 @@ with firedrake.CheckpointFile(output_filename, "w") as chk:
         t.assign(t + dt)
 
         h_solver.solve()
-        h.interpolate(firedrake.conditional(h < h_min + δh, 0, h))
+        h.project(firedrake.conditional(h < h_min + δh, 0, h))
         h_n.assign(h)
         s.interpolate(max_value(b + h, (1 - ρ_I / ρ_W) * h))
         u_solver.solve()
