@@ -8,6 +8,7 @@ import icepack
 options = PETSc.Options()
 input_filename = options.getString("input", "kangerlussuaq-friction.h5")
 outline_filename = options.getString("outline", "kangerlussuaq2.geojson")
+refinement = options.getInt("refinement", 1)
 output_filename = options.getString("output", "kangerlussuaq-initial.h5")
 
 # Read in the estimated friction
@@ -21,7 +22,7 @@ with firedrake.CheckpointFile(input_filename, "r") as chk:
 Δ_input = firedrake.FunctionSpace(input_mesh, "DG", 0)
 μ_input = firedrake.Function(Δ_input).interpolate(Constant(1))
 
-# Create the larger mesh and some functio nspaces
+# Create the larger mesh and some function spaces
 with open(outline_filename, "r") as outline_file:
     outline = geojson.load(outline_file)
 
@@ -34,7 +35,9 @@ mesh_filename = outline_filename.replace("geojson", "msh")
 command = f"gmsh -2 -v 0 -o {mesh_filename} {geometry_filename}"
 subprocess.run(command.split())
 
-mesh = firedrake.Mesh(mesh_filename)
+coarse_mesh = firedrake.Mesh(mesh_filename)
+mesh_hierarchy = firedrake.MeshHierarchy(coarse_mesh, refinement)
+mesh = mesh_hierarchy[-1]
 degree = q_input.ufl_element().degree()
 Q = firedrake.FunctionSpace(mesh, "CG", degree)
 V = firedrake.VectorFunctionSpace(mesh, "CG", degree)

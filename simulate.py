@@ -19,6 +19,7 @@ output_filename = options.getString("output", "kangerlussuaq-simulation.h5")
 final_time = options.getReal("final-time", 1.0)
 timesteps_per_year = options.getInt("timesteps-per-year", 192)
 critical_thickness = options.getReal("crit-thickness", 40.0)
+hdegree = options.getInt("degree", 1)
 
 with firedrake.CheckpointFile(input_filename, "r") as chk:
     mesh = chk.load_mesh()
@@ -27,12 +28,12 @@ with firedrake.CheckpointFile(input_filename, "r") as chk:
     τ_c = chk.h5pyfile.attrs["mean_stress"]
     u_c = chk.h5pyfile.attrs["mean_speed"]
 
-degree = q.ufl_element().degree()
+udegree = u.ufl_element().degree()
 S = q.function_space()
-Q = firedrake.FunctionSpace(mesh, "DG", degree)
+Q = firedrake.FunctionSpace(mesh, "DG", hdegree)
 V = u.function_space()
-Σ = firedrake.TensorFunctionSpace(mesh, "DG", degree - 1, symmetry=True)
-T = firedrake.VectorFunctionSpace(mesh, "DG", degree - 1)
+Σ = firedrake.TensorFunctionSpace(mesh, "DG", udegree - 1, symmetry=True)
+T = firedrake.VectorFunctionSpace(mesh, "DG", udegree - 1)
 Z = V * Σ * T
 
 u_in = u.copy(deepcopy=True)
