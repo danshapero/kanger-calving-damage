@@ -20,6 +20,8 @@ final_time = options.getReal("final-time", 1.0)
 timesteps_per_year = options.getInt("timesteps-per-year", 192)
 critical_thickness = options.getReal("crit-thickness", 40.0)
 hdegree = options.getInt("degree", 1)
+min_thickness = options.getReal("min-thickness", 1e-3)
+melt_rate = options.getReal("melt-rate", 500.0)
 
 with firedrake.CheckpointFile(input_filename, "r") as chk:
     mesh = chk.load_mesh()
@@ -68,7 +70,7 @@ fields = {
     "surface": s,
 }
 
-h_min = Constant(1e-3)
+h_min = Constant(min_thickness)
 rfields = {
     "velocity": u,
     "membrane_stress": M,
@@ -152,12 +154,18 @@ da_ds = Constant(2.25 * 1e-3)
 a_0 = Constant(-3.3)
 a = 0.917 * (a_0 + da_ds * s)
 
+# Set up things we need for calving
+h_min = firedrake.max_value(0, -ρ_W / ρ_I * b)
+δh = Constant(critical_thickness)
+m_0 = Constant(melt_rate)
+m = m_0 * firedrake.max_value(0, h_min + δh - h) / δh
+
 # Set up the mass balance equation
 h_n = h.copy(deepcopy=True)
 h0 = h.copy(deepcopy=True)
 φ = firedrake.TestFunction(h.function_space())
 dt = Constant(1.0 / timesteps_per_year)
-flux_cells = ((h - h_n) / dt * φ - inner(h * u, grad(φ)) - a * φ) * dx
+flux_cells = ((h - h_n) / dt * φ - inner(h * u, grad(φ)) - (a - m) * φ) * dx
 ν = firedrake.FacetNormal(mesh)
 f = h * max_value(0, inner(u, ν))
 flux_facets = (f("+") - f("-")) * (φ("+") - φ("-")) * dS
@@ -166,10 +174,6 @@ flux_out = h * max_value(0, inner(u, ν)) * φ * ds
 G = flux_cells + flux_facets + flux_in + flux_out
 h_problem = firedrake.NonlinearVariationalProblem(G, h)
 h_solver = firedrake.NonlinearVariationalSolver(h_problem)
-
-# Set up things we need for calving
-h_min = firedrake.max_value(0, -ρ_W / ρ_I * b)
-δh = Constant(critical_thickness)
 
 # Run the simulation
 t = Constant(0.0)
@@ -187,7 +191,7 @@ with firedrake.CheckpointFile(output_filename, "w") as chk:
         t.assign(t + dt)
 
         h_solver.solve()
-        h.project(firedrake.conditional(h < h_min + δh, 0, h))
+        h.interpolate(firedrake.conditional(h < h_c, 0, h))
         h_n.assign(h)
         s.interpolate(max_value(b + h, (1 - ρ_I / ρ_W) * h))
         u_solver.solve()
@@ -196,5 +200,3 @@ with firedrake.CheckpointFile(output_filename, "w") as chk:
             chk.save_function(field, name=name, idx=step + 1)
 
     chk.h5pyfile.create_dataset("timesteps", data=timesteps)
-
-
