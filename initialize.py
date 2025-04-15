@@ -1,7 +1,7 @@
 import numpy as np
 import geojson
-import rasterio
 import xarray
+import rioxarray
 import firedrake
 from firedrake import assemble, exp, ln, inner, grad, dx, ds, Constant
 import firedrake.adjoint
@@ -35,20 +35,15 @@ s = icepack.interpolate(bedmachine["surface"], Q)
 
 # Read in the velocity data
 measures_filenames = icepack.datasets.fetch_measures_greenland()
-vx_filename = [f for f in measures_filenames if "vx" in f][0]
-vy_filename = [f for f in measures_filenames if "vy" in f][0]
-ex_filename = [f for f in measures_filenames if "ex" in f][0]
-ey_filename = [f for f in measures_filenames if "ey" in f][0]
-
-with (
-    rasterio.open(vx_filename, "r") as vx_file,
-    rasterio.open(vy_filename, "r") as vy_file,
-    rasterio.open(ex_filename, "r") as ex_file,
-    rasterio.open(ey_filename, "r") as ey_file,
-):
-    u_obs = icepack.interpolate((vx_file, vy_file), V)
-    σx = icepack.interpolate(ex_file, Q)
-    σy = icepack.interpolate(ey_file, Q)
+vdata = {
+    key: xarray.open_dataset(
+        [f for f in measures_filenames if key in f][0], engine="rasterio",
+    ).squeeze()["band_data"]
+    for key in ["vx", "vy", "ex", "ey"]
+}
+u_obs = icepack.interpolate((vdata["vx"].fillna(0.0), vdata["vy"].fillna(0.0)), V)
+σx = icepack.interpolate(vdata["ex"].fillna(100e3), Q)
+σy = icepack.interpolate(vdata["ey"].fillna(100e3), Q)
 
 # Check and make sure there's no missing data
 assert u_obs.dat.data_ro.min() > -10e3
