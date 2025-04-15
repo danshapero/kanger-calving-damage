@@ -1,178 +1,144 @@
 import numpy as np
-import subprocess
 import geojson
 import rasterio
 import xarray
 import firedrake
-from firedrake import Constant, assemble, exp, ln, sqrt, inner, grad, dx
-from petsc4py import PETSc
+from firedrake import assemble, exp, ln, inner, grad, dx, ds, Constant
+import firedrake.adjoint
 import icepack
-from icepack.constants import (
-    ice_density as ρ_I, gravity as g, weertman_sliding_law as m
-)
+import icepack2
+from icepack2.model import minimization as model
 
-options = PETSc.Options()
-outline_filename = options.getString("outline", "kangerlussuaq1.geojson")
-output_filename = options.getString("output", "kangerlussuaq-friction.h5")
-regularization = options.getReal("regularization", 2.5e3)
-refinement = options.getInt("refinement", 1)
-degree = options.getInt("degree", 1)
-
-# Fetch the glacier outline, generate mesh, and create function spaces
+# Make a mesh
+outline_filename = "kangerlussuaq-small.geojson"
 with open(outline_filename, "r") as outline_file:
     outline = geojson.load(outline_file)
 
-geometry = icepack.meshing.collection_to_geo(outline)
-geometry_filename = outline_filename.replace("geojson", "geo")
-with open(outline_filename.replace("geojson", "geo"), "w") as geometry_file:
-    geometry_file.write(geometry.get_code())
+gmsh_mesh = icepack.meshing.collection_to_gmsh(outline)
+gmsh_mesh.write("kangerlussuaq-small.msh", verbose=False)
+mesh = firedrake.Mesh("kangerlussuaq-small.msh")
 
-mesh_filename = outline_filename.replace("geojson", "msh")
-command = f"gmsh -2 -v 0 -o {mesh_filename} {geometry_filename}"
-subprocess.run(command.split())
+# Create some function spaces
+cg1 = firedrake.FiniteElement("CG", "triangle", 1)
+dg0 = firedrake.FiniteElement("DG", "triangle", 0)
+Q = firedrake.FunctionSpace(mesh, cg1)
+V = firedrake.VectorFunctionSpace(mesh, cg1)
+Σ = firedrake.TensorFunctionSpace(mesh, dg0, symmetry=True)
+T = firedrake.VectorFunctionSpace(mesh, dg0)
+Z = V * Σ * T
 
-coarse_mesh = firedrake.Mesh(mesh_filename)
-mesh_hierarchy = firedrake.MeshHierarchy(coarse_mesh, refinement)
-mesh = mesh_hierarchy[-1]
-Q = firedrake.FunctionSpace(mesh, "CG", degree)
-V = firedrake.VectorFunctionSpace(mesh, "CG", degree)
-
-# Compute a bounding box for the spatial domain
-coords = np.array(list(geojson.utils.coords(outline)))
-delta = 2.5e3
-extent = {
-    "left": coords[:, 0].min() - delta,
-    "right": coords[:, 0].max() + delta,
-    "bottom": coords[:, 1].min() - delta,
-    "top": coords[:, 1].max() + delta,
-}
-
-# Read in the elevation and thickness data and interpolate it to the mesh
+# Read in the thickness + elevation data
 bedmachine_filename = icepack.datasets.fetch_bedmachine_greenland()
 bedmachine = xarray.open_dataset(bedmachine_filename)
 h = icepack.interpolate(bedmachine["thickness"], Q)
 s = icepack.interpolate(bedmachine["surface"], Q)
 
-# Read in the velocity data and interpolate it to the mesh
+# Read in the velocity data
 measures_filenames = icepack.datasets.fetch_measures_greenland()
-velocity_data = {}
-for key in ["vx", "vy", "ex", "ey"]:
-    filename = [f for f in measures_filenames if key in f][0]
-    with rasterio.open(filename, "r") as source:
-        window = rasterio.windows.from_bounds(
-            **extent, transform=source.transform
-        ).round_lengths().round_offsets()
-        xmin, ymin, xmax, ymax = source.window_bounds(window)
-        transform = source.window_transform(window)
-        velocity_data[key] = source.read(indexes=1, window=window)
+vx_filename = [f for f in measures_filenames if "vx" in f][0]
+vy_filename = [f for f in measures_filenames if "vy" in f][0]
+ex_filename = [f for f in measures_filenames if "ex" in f][0]
+ey_filename = [f for f in measures_filenames if "ey" in f][0]
 
-no_data = -2e9
-for key in ["vx", "vy"]:
-    val = velocity_data[key]
-    val[val == no_data] = 0.0
+with (
+    rasterio.open(vx_filename, "r") as vx_file,
+    rasterio.open(vy_filename, "r") as vy_file,
+    rasterio.open(ex_filename, "r") as ex_file,
+    rasterio.open(ey_filename, "r") as ey_file,
+):
+    u_obs = icepack.interpolate((vx_file, vy_file), V)
+    σx = icepack.interpolate(ex_file, Q)
+    σy = icepack.interpolate(ey_file, Q)
 
-for key in ["ex", "ey"]:
-    val = velocity_data[key]
-    val[val == no_data] = 100e3
-
-ny, nx = velocity_data["vx"].shape
-xs = np.linspace(xmin, xmax, nx)
-ys = np.linspace(ymin, ymax, ny)
-kw = {"dims": ("y", "x"), "coords": {"x": xs, "y": ys}}
-vx = xarray.DataArray(np.flipud(velocity_data["vx"]), **kw)
-vy = xarray.DataArray(np.flipud(velocity_data["vy"]), **kw)
-ex = xarray.DataArray(np.flipud(velocity_data["ex"]), **kw)
-ey = xarray.DataArray(np.flipud(velocity_data["ey"]), **kw)
-
-u_obs = icepack.interpolate((vx, vy), V)
-u_init = u_obs.copy(deepcopy=True)
-u = u_obs.copy(deepcopy=True)
-
-σx = icepack.interpolate(ex, Q)
-σy = icepack.interpolate(ey, Q)
-P = firedrake.Function(Q).interpolate(1.0 / firedrake.sqrt(σx**2 + σy**2))
-
-# Make an initial estimate for the basal friction by assuming it supports some
-# fraction of the driving stress
-τ = firedrake.project(-ρ_I * g * h * grad(s), V)
-
-area = assemble(Constant(1) * dx(mesh))
-u_avg = assemble(sqrt(inner(u, u)) * dx) / area
-τ_avg = assemble(sqrt(inner(τ, τ)) * dx) / area
-
-frac = Constant(0.5)
-C = frac * sqrt(inner(τ, τ)) / sqrt(inner(u, u)) ** (1 / m)
-q = firedrake.Function(Q).interpolate(-ln(u_avg ** (1 / m) * C / τ_avg))
-
-def bed_friction(**kwargs):
-    u, q = map(kwargs.get, ("velocity", "log_friction"))
-    C = Constant(τ_avg) / Constant(u_avg) ** (1 / m) * exp(-q)
-    return icepack.models.friction.bed_friction(velocity=u, friction=C)
+# Check and make sure there's no missing data
+assert u_obs.dat.data_ro.min() > -10e3
 
 # Compute an initial estimate for the ice velocity
-T = firedrake.Constant(260.0)
+T = Constant(260.0)
 A = icepack.rate_factor(T)
 
-flow_model = icepack.models.IceStream(friction=bed_friction)
-opts = {
-    "dirichlet_ids": [1, 2, 3, 4],
-    "diagnostic_solver_type": "petsc",
-    "diagnostic_solver_parameters": {
-        "snes_type": "newtontr",
-        "snes_max_it": 100,
+ρ_I = Constant(icepack2.constants.ice_density)
+g = Constant(icepack2.constants.gravity)
+τ = firedrake.project(-ρ_I * g * h * grad(s), V)
+area = assemble(Constant(1) * dx(mesh))
+u_avg = np.sqrt(assemble(inner(u_obs, u_obs) * dx) / area)
+τ_avg = np.sqrt(assemble(inner(τ, τ) * dx) / area)
+
+m = Constant(icepack2.constants.weertman_sliding_law)
+n = Constant(icepack2.constants.glen_flow_law)
+
+K = Constant(u_avg / τ_avg ** icepack2.constants.weertman_sliding_law)
+
+τ_c = Constant(0.1)
+ε_c = Constant(A * τ_c ** n)
+u_c = Constant(K * τ_c ** m)
+
+z = firedrake.Function(Z)
+z.sub(0).assign(u_obs)
+
+u, M, τ = firedrake.split(z)
+fields = {
+    "velocity": u,
+    "membrane_stress": M,
+    "basal_stress": τ,
+    "thickness": h,
+    "surface": s,
+}
+
+
+α = Constant(0.01)
+linear_rheology = {
+    "flow_law_exponent": 1,
+    "flow_law_coefficient": α * ε_c / τ_c,
+    "sliding_exponent": 1,
+    "sliding_coefficient": α * u_c / τ_c,
+}
+
+glen_rheology = {
+    "flow_law_exponent": n,
+    "flow_law_coefficient": ε_c / τ_c**n,
+    "sliding_exponent": m,
+    "sliding_coefficient": u_c / τ_c**m,
+}
+
+L = (
+    model.viscous_power(**fields, **linear_rheology) +
+    model.viscous_power(**fields, **glen_rheology) +
+    model.friction_power(**fields, **linear_rheology) +
+    model.friction_power(**fields, **glen_rheology) +
+    model.momentum_balance(**fields)
+)
+F = firedrake.derivative(L, z)
+
+boundary_ids = [1, 2, 3, 4]
+bc = firedrake.DirichletBC(Z.sub(0), u_obs, boundary_ids)
+
+qdegree = 6
+problem_params = {
+    "form_compiler_parameters": {"quadrature_degree": qdegree},
+    "bcs": bc,
+}
+
+solver_params = {
+    "solver_parameters": {
+        "snes_monitor": None,
+        "snes_stol": 0.0,
+        "snes_max_it": 200,
+        "snes_divergence_tolerance": 1e20,
+        "snes_type": "newtonls",
+        "snes_linesearch_type": "nleqerr",
         "ksp_type": "gmres",
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
     },
 }
-flow_solver = icepack.solvers.FlowSolver(flow_model, **opts)
-u_init = u.copy(deepcopy=True)
-u = flow_solver.diagnostic_solve(
-    velocity=u_init,
-    thickness=h,
-    surface=s,
-    fluidity=A,
-    log_friction=q,
-)
 
-# Estimate the basal friction coefficient
-Ω = Constant(area)
-α = Constant(regularization)
+problem = firedrake.NonlinearVariationalProblem(F, z, **problem_params)
+solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
 
-def simulation(q):
-    fields = {"velocity": u_init, "thickness": h, "surface": s, "fluidity": A}
-    return flow_solver.diagnostic_solve(**fields, log_friction=q)
-
-def regularization(q):
-    return 0.5 * α**2 / Ω * inner(grad(q), grad(q)) * dx
-
-def loss_functional(u):
-    return 0.5 * P**2 / Ω * inner(u - u_obs, u - u_obs) * dx
-
-problem = icepack.statistics.StatisticsProblem(
-    simulation=simulation,
-    loss_functional=loss_functional,
-    regularization=regularization,
-    controls=q,
-)
-
-estimator = icepack.statistics.MaximumProbabilityEstimator(
-    problem, gradient_tolerance=5e-5, step_tolerance=1e-8, max_iterations=50
-)
-
-q_optimal = estimator.solve()
-u = simulation(q_optimal)
-
-import matplotlib.pyplot as plt
-fig, ax = plt.subplots()
-ax.set_aspect("equal")
-colors = firedrake.tripcolor(q_optimal, axes=ax)
-fig.colorbar(colors)
-plt.show()
-
-# Save the results to disk
-with firedrake.CheckpointFile(output_filename, "w") as chk:
-    chk.save_function(q_optimal, name="log_friction")
-    chk.save_function(u, name="velocity")
-    chk.h5pyfile.attrs["mean_stress"] = τ_avg
-    chk.h5pyfile.attrs["mean_speed"] = u_avg
+num_continuation_steps = 5
+λs = np.linspace(0.0, 1.0, num_continuation_steps)
+for λ in λs:
+    n.assign((1 - λ) + λ * icepack2.constants.glen_flow_law)
+    m.assign((1 - λ) + λ * icepack2.constants.weertman_sliding_law)
+    solver.solve()
