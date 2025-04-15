@@ -7,7 +7,7 @@ from firedrake import assemble, exp, ln, inner, grad, dx, ds, Constant
 import firedrake.adjoint
 import icepack
 import icepack2
-from icepack2.model import minimization as model
+from icepack2.model import variational as model
 
 # Make a mesh
 outline_filename = "kangerlussuaq1.geojson"
@@ -101,14 +101,15 @@ glen_rheology = {
     "sliding_coefficient": u_c / τ_c**m,
 }
 
-L = (
-    model.viscous_power(**fields, **linear_rheology) +
-    model.viscous_power(**fields, **glen_rheology) +
-    model.friction_power(**fields, **linear_rheology) +
-    model.friction_power(**fields, **glen_rheology) +
-    model.momentum_balance(**fields)
+v, N, σ = firedrake.TestFunctions(Z)
+
+F = (
+    model.flow_law(**fields, **linear_rheology, test_function=N) +
+    model.flow_law(**fields, **glen_rheology, test_function=N) +
+    model.friction_law(**fields, **linear_rheology, test_function=σ) +
+    model.friction_law(**fields, **glen_rheology, test_function=σ) +
+    model.momentum_balance(**fields, test_function=v)
 )
-F = firedrake.derivative(L, z)
 
 boundary_ids = [1, 2, 3, 4]
 bc = firedrake.DirichletBC(Z.sub(0), u_obs, boundary_ids)
