@@ -10,13 +10,13 @@ import icepack2
 from icepack2.model import minimization as model
 
 # Make a mesh
-outline_filename = "kangerlussuaq-small.geojson"
+outline_filename = "kangerlussuaq1.geojson"
 with open(outline_filename, "r") as outline_file:
     outline = geojson.load(outline_file)
 
 gmsh_mesh = icepack.meshing.collection_to_gmsh(outline)
-gmsh_mesh.write("kangerlussuaq-small.msh", verbose=False)
-mesh = firedrake.Mesh("kangerlussuaq-small.msh")
+gmsh_mesh.write("kangerlussuaq1.msh", verbose=False)
+mesh = firedrake.Mesh("kangerlussuaq1.msh")
 
 # Create some function spaces
 cg1 = firedrake.FiniteElement("CG", "triangle", 1)
