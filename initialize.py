@@ -3,7 +3,7 @@ import geojson
 import xarray
 import rioxarray
 import firedrake
-from firedrake import assemble, exp, ln, inner, grad, dx, ds, Constant
+from firedrake import replace, assemble, exp, ln, inner, grad, dx, ds, Constant
 import firedrake.adjoint
 import icepack
 import icepack2
@@ -98,9 +98,10 @@ glen_rheology = {
 
 v, N, σ = firedrake.TestFunctions(Z)
 
+H = Constant(800.)
 F = (
-    model.flow_law(**fields, **linear_rheology, test_function=N) +
-    model.flow_law(**fields, **glen_rheology, test_function=N) +
+    replace(model.flow_law(**fields, **linear_rheology, test_function=N), {h: H}) +
+    replace(model.flow_law(**fields, **glen_rheology, test_function=N), {h: H}) +
     model.friction_law(**fields, **linear_rheology, test_function=σ) +
     model.friction_law(**fields, **glen_rheology, test_function=σ) +
     model.momentum_balance(**fields, test_function=v)
