@@ -10,13 +10,13 @@ import icepack2
 from icepack2.model import variational as model
 
 # Make a mesh
-outline_filename = "kangerlussuaq1.geojson"
+outline_filename = "kangerlussuaq2.geojson"
 with open(outline_filename, "r") as outline_file:
     outline = geojson.load(outline_file)
 
 gmsh_mesh = icepack.meshing.collection_to_gmsh(outline)
-gmsh_mesh.write("kangerlussuaq1.msh", verbose=False)
-mesh = firedrake.Mesh("kangerlussuaq1.msh")
+gmsh_mesh.write("kangerlussuaq2.msh", verbose=False)
+mesh = firedrake.Mesh("kangerlussuaq2.msh")
 
 # Create some function spaces
 cg1 = firedrake.FiniteElement("CG", "triangle", 1)
