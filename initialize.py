@@ -16,7 +16,9 @@ with open(outline_filename, "r") as outline_file:
 
 gmsh_mesh = icepack.meshing.collection_to_gmsh(outline)
 gmsh_mesh.write("kangerlussuaq2.msh", verbose=False)
-mesh = firedrake.Mesh("kangerlussuaq2.msh")
+coarse_mesh = firedrake.Mesh("kangerlussuaq2.msh")
+mesh_hierarchy = firedrake.MeshHierarchy(coarse_mesh, 1)
+mesh = mesh_hierarchy[-1]
 
 # Create some function spaces
 cg1 = firedrake.FiniteElement("CG", "triangle", 1)
@@ -99,11 +101,12 @@ linear_rheology = {
     "sliding_coefficient": α * u_c / τ_c,
 }
 
+φ = firedrake.Function(Q)
 glen_rheology = {
     "flow_law_exponent": n,
     "flow_law_coefficient": ε_c / τ_c**n,
     "sliding_exponent": m,
-    "sliding_coefficient": u_c / τ_c**m,
+    "sliding_coefficient": u_c / τ_c**m * exp(φ),
 }
 
 v, N, σ = firedrake.TestFunctions(Z)
@@ -143,9 +146,30 @@ solver_params = {
 problem = firedrake.NonlinearVariationalProblem(F, z, **problem_params)
 solver = firedrake.NonlinearVariationalSolver(problem, **solver_params)
 
+# Set up the adjoint calculations
+import pyadjoint
+from firedrake.adjoint import ReducedFunctional, Control
+
+firedrake.adjoint.continue_annotation()
+
 num_continuation_steps = 5
 λs = np.linspace(0.0, 1.0, num_continuation_steps)
 for λ in λs:
     n.assign((1 - λ) + λ * icepack2.constants.glen_flow_law)
     m.assign((1 - λ) + λ * icepack2.constants.weertman_sliding_law)
     solver.solve()
+
+area = firedrake.assemble(Constant(1) * dx(mesh))
+Ω = firedrake.Constant(area)
+
+δu = u - u_obs
+E = 0.5 / Ω * (((δu[0]) / σx)**2 + (δu[1] / σy)**2) * dx
+
+λ = Constant(5e3)
+R = 0.5 * λ**2 / Ω * inner(grad(φ), grad(φ)) * dx
+
+controls = [Control(φ)]
+J = ReducedFunctional(assemble(E) + assemble(R), controls)
+ψ = J.derivative()[0]
+
+firedrake.adjoint.pause_annotation()
