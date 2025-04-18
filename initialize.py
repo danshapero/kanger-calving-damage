@@ -41,6 +41,16 @@ vdata = {
     ).squeeze()["band_data"]
     for key in ["vx", "vy", "ex", "ey"]
 }
+
+# Mask out a neighboring glacier that we don't want (yet??)
+xmin, xmax = 490.5e3, 496.3e3
+ymin, ymax = -2298.5e3, -2294.0e3
+for key in ["vx", "vy"]:
+    ds = vdata[key]
+    x, y = ds["x"], ds["y"]
+    mask = (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+    vdata[key] = ds.where(~mask, other=0)
+
 u_obs = icepack.interpolate((vdata["vx"].fillna(0.0), vdata["vy"].fillna(0.0)), V)
 σx = icepack.interpolate(vdata["ex"].fillna(100e3), Q)
 σy = icepack.interpolate(vdata["ey"].fillna(100e3), Q)
